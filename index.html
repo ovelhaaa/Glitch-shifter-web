@@ -5,52 +5,120 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Glitch Shifter — Web Simulation</title>
 <style>
-  body { font-family: Arial, sans-serif; background: #111; color: #eee; max-width: 760px; margin: 20px auto; padding: 16px; }
-  .card { background: #222; padding: 14px; margin: 12px 0; border-radius: 8px; }
-  button { padding: 10px 12px; border-radius: 6px; border: none; background: #4af; color: #000; cursor: pointer; font-weight: bold; }
-  button.active { background: #fa4; }
-  input[type=range] { width: 100%; margin-top: 8px; }
-  label { display: flex; justify-content: space-between; font-size: 14px; }
-  .file-input { margin-bottom: 20px; }
-  audio { width: 100%; margin-top: 10px; border-radius: 6px; }
+  body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #121212; color: #e0e0e0; max-width: 800px; margin: 20px auto; padding: 20px; }
+  h1 { text-align: center; color: #ffffff; margin-bottom: 30px; }
+
+  .grid-container { display: grid; grid-template-columns: 1fr; gap: 20px; }
+  @media (min-width: 600px) { .grid-container { grid-template-columns: 1fr 1fr; } }
+  .card { background: #1e1e1e; padding: 20px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.3); display: flex; flex-direction: column; gap: 12px; }
+  .card.full-width { grid-column: 1 / -1; }
+  .card-title { font-size: 18px; font-weight: bold; margin-bottom: 8px; color: #4af; border-bottom: 1px solid #333; padding-bottom: 8px; display: flex; justify-content: space-between; align-items: center; }
+
+  .control-group { display: flex; flex-direction: column; gap: 4px; }
+  label { display: flex; justify-content: space-between; font-size: 14px; color: #bbb; }
+  .val-display { font-family: monospace; color: #fff; background: #333; padding: 2px 6px; border-radius: 4px; font-size: 12px; }
+
+  input[type=range] { -webkit-appearance: none; width: 100%; background: transparent; }
+  input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; height: 16px; width: 16px; border-radius: 50%; background: #4af; cursor: pointer; margin-top: -6px; }
+  input[type=range]::-webkit-slider-runnable-track { width: 100%; height: 4px; cursor: pointer; background: #444; border-radius: 2px; }
+
+  button { padding: 10px 16px; border-radius: 8px; border: none; background: #333; color: #fff; cursor: pointer; font-weight: 600; transition: all 0.2s ease; display: flex; justify-content: center; align-items: center; }
+  button:hover { background: #444; }
+
+  /* Bypass button styles */
+  .bypass-btn { background: #2a2a2a; border: 1px solid #444; color: #888; }
+  .bypass-btn.active { background: #ff4444; border-color: #ff4444; color: #fff; }
+
+  /* Action button styles */
+  .action-btn { background: #4af; color: #000; }
+  .action-btn:hover { background: #5bf; }
+  .action-btn.active { background: #fa4; }
+
+  audio { width: 100%; margin-top: 10px; border-radius: 8px; background: #111; }
+  input[type=file] { color: #bbb; font-size: 14px; }
 </style>
 </head>
 <body>
 
-<h1>Glitch Shifter — Web Simulation</h1>
+<h1>Glitch Shifter</h1>
 
-<div class="card file-input">
-  <label for="audioFile">Load Local Audio File:</label>
+<div class="card full-width">
+  <div class="card-title">Audio Source</div>
   <input type="file" id="audioFile" accept="audio/*">
   <audio id="audioPlayer" controls loop></audio>
 </div>
 
-<div class="card">
-  <label>Pitch (semitones) <span id="pitchVal">7</span></label>
-  <input id="pitch" type="range" min="-24" max="24" step="0.1" value="7">
-  <button id="bypassPitch" style="margin-top:10px;">Bypass Pitch</button>
-</div>
+<div class="grid-container">
 
-<div class="card">
-  <label>Bitcrusher <span id="crushVal">0</span></label>
-  <input id="crush" type="range" min="0" max="1" step="0.01" value="0">
-  <button id="bypassCrush" style="margin-top:10px;">Bypass Crusher</button>
-</div>
+  <div class="card">
+    <div class="card-title">
+      Pitch Shifter
+      <button id="bypassPitch" class="bypass-btn" title="Toggle Bypass">Active</button>
+    </div>
 
-<div class="card">
-  <label>Reverb Room <span id="roomVal">0.9</span></label>
-  <input id="room" type="range" min="0" max="1" step="0.01" value="0.9">
-  <label style="margin-top:8px;">Reverb Damp <span id="dampVal">0.2</span></label>
-  <input id="damp" type="range" min="0" max="1" step="0.01" value="0.2">
-  <label style="margin-top:8px;">Reverb Wet <span id="wetVal">0.25</span></label>
-  <input id="wet" type="range" min="0" max="1" step="0.01" value="0.25">
-  <button id="bypassReverb" style="margin-top:10px;">Bypass Reverb</button>
-</div>
+    <div class="control-group">
+      <label>Semitones <span class="val-display" id="pitchVal">7</span></label>
+      <input id="pitch" type="range" min="-24" max="24" step="1" value="7">
+    </div>
 
-<div class="card">
-  <button id="freezeBtn">Freeze</button>
-  <label style="margin-top:8px;">Freeze Normalize <span id="normVal">0.8</span></label>
-  <input id="norm" type="range" min="0" max="1" step="0.01" value="0.8">
+    <div class="control-group" style="margin-top: 8px;">
+      <label>Mix <span class="val-display" id="pitchMixVal">1.00</span></label>
+      <input id="pitchMix" type="range" min="0" max="1" step="0.01" value="1.0">
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">
+      Bitcrusher
+      <button id="bypassCrush" class="bypass-btn" title="Toggle Bypass">Active</button>
+    </div>
+
+    <div class="control-group">
+      <label>Amount <span class="val-display" id="crushVal">0.00</span></label>
+      <input id="crush" type="range" min="0" max="1" step="0.01" value="0">
+    </div>
+
+    <div class="control-group" style="margin-top: 8px;">
+      <label>Mix <span class="val-display" id="crushMixVal">1.00</span></label>
+      <input id="crushMix" type="range" min="0" max="1" step="0.01" value="1.0">
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">
+      Reverb
+      <button id="bypassReverb" class="bypass-btn" title="Toggle Bypass">Active</button>
+    </div>
+
+    <div class="control-group">
+      <label>Room Size <span class="val-display" id="roomVal">0.90</span></label>
+      <input id="room" type="range" min="0" max="1" step="0.01" value="0.9">
+    </div>
+
+    <div class="control-group">
+      <label>Damping <span class="val-display" id="dampVal">0.20</span></label>
+      <input id="damp" type="range" min="0" max="1" step="0.01" value="0.2">
+    </div>
+
+    <div class="control-group">
+      <label>Mix (Wet/Dry) <span class="val-display" id="wetVal">0.25</span></label>
+      <input id="wet" type="range" min="0" max="1" step="0.01" value="0.25">
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">
+      Freeze
+    </div>
+
+    <button id="freezeBtn" class="action-btn" style="margin-bottom: 12px; font-size: 16px; padding: 12px;">Activate Freeze</button>
+
+    <div class="control-group">
+      <label>Normalize Level <span class="val-display" id="normVal">0.80</span></label>
+      <input id="norm" type="range" min="0" max="1" step="0.01" value="0.8">
+    </div>
+  </div>
+
 </div>
 
 <script>
@@ -64,7 +132,9 @@
   // Parameters caching
   const dspParams = {
     pitch_semitones: 7.0,
+    pitch_mix: 1.0,
     crusher_amount: 0.0,
+    crusher_mix: 1.0,
     reverb_room: 0.9,
     reverb_damp: 0.2,
     reverb_wet: 0.25,
@@ -111,14 +181,26 @@
     const el = document.getElementById(id);
     el.addEventListener('input', () => {
       const val = parseFloat(el.value);
-      document.getElementById(id + 'Val').innerText = val;
+
+      // Update display text, with fixed decimals if needed
+      const displayEl = document.getElementById(id + 'Val');
+      if (displayEl) {
+        if (el.step && el.step.includes('.')) {
+          displayEl.innerText = val.toFixed(2);
+        } else {
+          displayEl.innerText = val;
+        }
+      }
+
       dspParams[paramKey] = val;
       sendParam(paramKey, val);
     });
   }
 
   bindSlider('pitch', 'pitch_semitones');
+  bindSlider('pitchMix', 'pitch_mix');
   bindSlider('crush', 'crusher_amount');
+  bindSlider('crushMix', 'crusher_mix');
   bindSlider('room', 'reverb_room');
   bindSlider('damp', 'reverb_damp');
   bindSlider('wet', 'reverb_wet');
@@ -127,9 +209,10 @@
   function bindBypass(id, paramKey) {
     const btn = document.getElementById(id);
     btn.addEventListener('click', () => {
-      const isActive = btn.classList.toggle('active');
-      dspParams[paramKey] = isActive;
-      sendParam(paramKey, isActive);
+      const isBypassed = btn.classList.toggle('active');
+      btn.innerText = isBypassed ? 'Bypassed' : 'Active';
+      dspParams[paramKey] = isBypassed;
+      sendParam(paramKey, isBypassed);
     });
   }
 
@@ -140,6 +223,7 @@
   const freezeBtn = document.getElementById('freezeBtn');
   freezeBtn.addEventListener('click', () => {
     const isActive = freezeBtn.classList.toggle('active');
+    freezeBtn.innerText = isActive ? 'Deactivate Freeze' : 'Activate Freeze';
     dspParams['freeze'] = isActive;
     sendParam('freeze', isActive);
   });
