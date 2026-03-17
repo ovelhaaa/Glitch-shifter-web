@@ -17,10 +17,15 @@ class BitCrusher {
 
     process(inp) {
         if (this.amount <= 0.0001) return inp;
-        let factor = 1 + Math.floor(this.amount * 511.0);
-        if (this.counter === 0) {
+
+        // Exponential mapping for a wider and easier to dial in control range.
+        // The hold samples are mapped logarithmically, so lower values give a
+        // musical crunch that gradually gets more extreme.
+        let factor = Math.max(1, Math.floor(Math.pow(2.0, this.amount * 8.0)));
+
+        if (this.counter <= 0) {
             this.hold = inp;
-            this.counter = factor;
+            this.counter = factor - 1;
         } else {
             this.counter--;
         }
@@ -28,83 +33,123 @@ class BitCrusher {
     }
 }
 
+// PitchShifter redesigned as a real-time safe dual-grain overlap-add pitch shifter.
+// The old design used a hard switch/tap-swap that caused clicks because the
+// crossfade was abrupt and the phases were not continuously windowed.
+// This new design uses two grains, 180 degrees out of phase, with continuous
+// Hann windowing to ensure smooth overlapping without discontinuities.
 class PitchShifter {
     constructor() {
         this.buf = null;
         this.bufSize = 0;
-        this.delSize = 0;
         this.sr = 48000;
         this.writePos = 0;
-        this.readPosA = 0.0;
-        this.readPosB = 0.0;
-        this.ampA = 1.0;
-        this.ampB = 0.0;
-        this.crossfadeLen = 1024;
-        this.samplesSinceSwap = 0;
+
+        this.grainSizeSamples = 2048; // ~40ms at 48kHz
+        this.baseDelaySamples = 2048; // Safe delay behind the writer
+
+        // Two grains, phases in [0, 1)
+        this.phaseA = 0.0;
+        this.phaseB = 0.5; // 180 degrees out of phase
+
         this.rate = 1.0;
         this.active = false;
     }
 
     init(sampleRate, bufferSamples) {
+        // Handle invalid sample rate or buffer size safely
+        if (!sampleRate || sampleRate <= 0) sampleRate = 48000;
+        if (!bufferSamples || bufferSamples <= 0) bufferSamples = 8192;
+
         this.sr = sampleRate;
         this.bufSize = bufferSamples;
         this.buf = new Float32Array(this.bufSize + 4);
         this.writePos = 0;
-        this.readPosA = 0.0;
-        this.readPosB = this.bufSize / 2.0;
-        this.ampA = 1.0;
-        this.ampB = 0.0;
-        this.crossfadeLen = Math.floor(bufferSamples / 8) > 256 ? Math.floor(bufferSamples / 8) : 256;
-        this.samplesSinceSwap = 0;
+
+        // Setup grain geometry
+        // Conservative default grain size: ~40ms
+        this.grainSizeSamples = Math.floor(this.sr * 0.040);
+        if (this.grainSizeSamples < 128) this.grainSizeSamples = 128;
+
+        // Base delay safely behind writer
+        let calculatedBaseDelay = Math.floor(this.sr * 0.050);
+        this.baseDelaySamples = Math.max(this.grainSizeSamples, calculatedBaseDelay);
+
+        // Reset phases
+        this.phaseA = 0.0;
+        this.phaseB = 0.5;
+
         this.active = true;
         return true;
     }
 
     setTransposition(semitones) {
+        // Clamp pitch shift range to a practical range, e.g., [-12, +12]
+        if (semitones < -12.0) semitones = -12.0;
+        if (semitones > 12.0) semitones = 12.0;
         this.rate = Math.pow(2.0, semitones / 12.0);
     }
 
-    setDelSize(samples) {
-        this.delSize = samples;
+    wrapIndex(pos) {
+        while (pos >= this.bufSize) pos -= this.bufSize;
+        while (pos < 0) pos += this.bufSize;
+        return pos;
     }
 
     readInterpolated(pos) {
         let idx = Math.floor(pos);
         let frac = pos - idx;
-        let i1 = idx;
-        let i2 = idx + 1;
-        if (i1 >= this.bufSize) i1 -= this.bufSize;
-        if (i2 >= this.bufSize) i2 -= this.bufSize;
+        let i1 = this.wrapIndex(idx);
+        let i2 = this.wrapIndex(idx + 1);
         let s1 = this.buf[i1];
         let s2 = this.buf[i2];
         return s1 + frac * (s2 - s1);
     }
 
+    // Calculates the window amplitude for a given phase in [0, 1) using a Hann window
+    getWindow(phase) {
+        return 0.5 - 0.5 * Math.cos(2.0 * Math.PI * phase);
+    }
+
     process(inp) {
         if (!this.active || !this.buf) return inp;
+
+        // Write the input sample
         this.buf[this.writePos] = inp;
+        let currentWritePos = this.writePos;
+
         if (++this.writePos >= this.bufSize) this.writePos = 0;
 
-        let outA = this.readInterpolated(this.readPosA);
-        let outB = this.readInterpolated(this.readPosB);
-        let out = this.ampA * outA + this.ampB * outB;
+        // Phase increment tied to grain duration
+        let phaseInc = 1.0 / this.grainSizeSamples;
 
-        this.readPosA += this.rate;
-        this.readPosB += this.rate;
+        // Grain travel based on rate
+        // rate = 1.0 -> no shift, travel equals 0 (read head moves at exactly write speed)
+        // rate > 1.0 -> higher pitch, read head travels forward relative to write head
+        // rate < 1.0 -> lower pitch, read head travels backward relative to write head
+        let rateTravel = this.rate - 1.0;
 
-        while (this.readPosA >= this.bufSize) this.readPosA -= this.bufSize;
-        while (this.readPosB >= this.bufSize) this.readPosB -= this.bufSize;
-        while (this.readPosA < 0.0) this.readPosA += this.bufSize;
-        while (this.readPosB < 0.0) this.readPosB += this.bufSize;
+        // Calculate read position for Grain A
+        let grainTravelA = this.phaseA * this.grainSizeSamples * rateTravel;
+        let readPosA = this.wrapIndex(currentWritePos - this.baseDelaySamples + grainTravelA);
+        let outA = this.readInterpolated(readPosA);
+        let winA = this.getWindow(this.phaseA);
 
-        if (++this.samplesSinceSwap >= this.crossfadeLen) {
-            this.samplesSinceSwap = 0;
-            let tmp = this.ampA;
-            this.ampA = this.ampB;
-            this.ampB = tmp;
-            this.readPosB = this.readPosA + (this.bufSize / 2.0);
-            if (this.readPosB >= this.bufSize) this.readPosB -= this.bufSize;
-        }
+        // Calculate read position for Grain B
+        let grainTravelB = this.phaseB * this.grainSizeSamples * rateTravel;
+        let readPosB = this.wrapIndex(currentWritePos - this.baseDelaySamples + grainTravelB);
+        let outB = this.readInterpolated(readPosB);
+        let winB = this.getWindow(this.phaseB);
+
+        let out = outA * winA + outB * winB;
+
+        // Advance phases
+        this.phaseA += phaseInc;
+        this.phaseB += phaseInc;
+
+        // Respawn grains silently when phase wraps
+        if (this.phaseA >= 1.0) this.phaseA -= 1.0;
+        if (this.phaseB >= 1.0) this.phaseB -= 1.0;
 
         return out;
     }
@@ -206,6 +251,9 @@ class MonoFreeverb {
     }
 
     setRoom(r) {
+        // Clamp room feedback to safe ranges to prevent blowing up
+        if (r > 0.98) r = 0.98;
+        if (r < 0.0) r = 0.0;
         this.room = r;
         this.savedRoom = r;
         for (let i = 0; i < 8; i++) this.comb[i].setFeedback(r);
@@ -223,7 +271,8 @@ class MonoFreeverb {
 
     setFreeze(f) {
         if (f && !this.freeze) {
-            for (let i = 0; i < 8; i++) this.comb[i].setFeedback(1.0);
+            // Use safer near-unity value instead of 1.0 to prevent infinite build-up
+            for (let i = 0; i < 8; i++) this.comb[i].setFeedback(0.9999);
             this.freezePeak = 1e-6;
         } else if (!f && this.freeze) {
             for (let i = 0; i < 8; i++) this.comb[i].setFeedback(this.savedRoom);
@@ -239,9 +288,15 @@ class MonoFreeverb {
     }
 
     process(mono) {
-        let combInput = this.freeze ? 0.0 : mono;
+        // Scale input down to prevent saturation in the comb bank
+        let combInput = this.freeze ? 0.0 : mono * 0.15;
         let out = 0.0;
+
         for (let i = 0; i < 8; i++) out += this.comb[i].process(combInput);
+
+        // Attenuate summed comb output
+        out *= 0.25;
+
         for (let i = 0; i < 4; i++) out = this.allpass[i].process(out);
 
         let freezeGain = 1.0;
@@ -270,6 +325,24 @@ class MonoFreeverb {
     }
 }
 
+/**
+ * GlitchShifterProcessor
+ *
+ * Major Improvements Summary:
+ * 1. Pitch Shifter: The old shifter clicked because it abruptly swapped between
+ *    read heads without continuously windowing the crossfade, causing discontinuities.
+ *    The new design uses a dual-grain overlap-add strategy. Grains are spaced 180
+ *    degrees out of phase, Hann-windowed, and respawned safely behind the writer
+ *    when their phase wraps. This prevents clicks at the cost of slight latency
+ *    and some typical graininess for granular shifts.
+ * 2. Reverb: Gain staging improved. Comb bank input is scaled down and output is
+ *    attenuated. Room parameters are clamped below 1.0 (freeze uses 0.9999). This
+ *    stops internal saturation.
+ * 3. BitCrusher: Switched from linear to an exponential mapping, making the control
+ *    range wider and more useful/musical to dial in.
+ * 4. Limiting: Added a soft clipper (tanh) before the final hard limiter to avoid
+ *    harsh digital distortion while still bounding output.
+ */
 class GlitchShifterProcessor extends AudioWorkletProcessor {
     constructor() {
         super();
@@ -348,7 +421,11 @@ class GlitchShifterProcessor extends AudioWorkletProcessor {
             if (!this.params.bypass_crusher) x = this.crusher.process(x);
             if (!this.params.bypass_reverb) x = this.reverb.process(x);
 
-            // Limiter
+            // Gentle global soft limiting to prevent harsh digital clipping.
+            // Using a simple tanh approximation or Math.tanh for smooth saturation.
+            x = Math.tanh(x);
+
+            // Safety hard clamp just in case
             if (x > 1.0) x = 1.0;
             if (x < -1.0) x = -1.0;
 
