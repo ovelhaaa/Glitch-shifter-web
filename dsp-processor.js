@@ -91,9 +91,7 @@ class PitchShifter {
     }
 
     wrapIndex(pos) {
-        while (pos >= this.bufSize) pos -= this.bufSize;
-        while (pos < 0) pos += this.bufSize;
-        return pos;
+        return ((pos % this.bufSize) + this.bufSize) % this.bufSize;
     }
 
     readInterpolated(pos) {
