@@ -351,10 +351,12 @@ class GlitchShifterProcessor extends AudioWorkletProcessor {
 
         this.params = {
             pitch_semitones: 7.0,
+            pitch_mix: 1.0,
             reverb_room: 0.9,
             reverb_damp: 0.2,
             reverb_wet: 0.25,
             crusher_amount: 0.0,
+            crusher_mix: 1.0,
             freeze: false,
             freeze_norm: 0.8,
             bypass_pitch: false,
@@ -370,7 +372,7 @@ class GlitchShifterProcessor extends AudioWorkletProcessor {
 
                 if (this.initialized) {
                     switch (key) {
-                        case 'pitch_semitones': this.shifter.setTransposition(val); break;
+                        case 'pitch_semitones': this.shifter.setTransposition(Math.round(val)); break;
                         case 'reverb_room': this.reverb.setRoom(val); break;
                         case 'reverb_damp': this.reverb.setDamp(val); break;
                         case 'reverb_wet': this.reverb.setWet(val); break;
@@ -386,7 +388,7 @@ class GlitchShifterProcessor extends AudioWorkletProcessor {
     process(inputs, outputs, parameters) {
         if (!this.initialized) {
             this.shifter.init(sampleRate, 8192);
-            this.shifter.setTransposition(this.params.pitch_semitones);
+            this.shifter.setTransposition(Math.round(this.params.pitch_semitones));
 
             this.reverb.init(sampleRate);
             this.reverb.setRoom(this.params.reverb_room);
@@ -415,9 +417,20 @@ class GlitchShifterProcessor extends AudioWorkletProcessor {
             let mono = 0.5 * (inL + inR);
 
             let x = mono;
-            if (!this.params.bypass_pitch) x = this.shifter.process(x);
-            if (!this.params.bypass_crusher) x = this.crusher.process(x);
-            if (!this.params.bypass_reverb) x = this.reverb.process(x);
+
+            if (!this.params.bypass_pitch) {
+                let shiftOut = this.shifter.process(x);
+                x = x * (1.0 - this.params.pitch_mix) + shiftOut * this.params.pitch_mix;
+            }
+
+            if (!this.params.bypass_crusher) {
+                let crushOut = this.crusher.process(x);
+                x = x * (1.0 - this.params.crusher_mix) + crushOut * this.params.crusher_mix;
+            }
+
+            if (!this.params.bypass_reverb) {
+                x = this.reverb.process(x);
+            }
 
             // Gentle global soft limiting to prevent harsh digital clipping.
             // Using a simple tanh approximation or Math.tanh for smooth saturation.
