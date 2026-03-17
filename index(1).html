@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Glitch Shifter — Web Simulation</title>
+<style>
+  body { font-family: Arial, sans-serif; background: #111; color: #eee; max-width: 760px; margin: 20px auto; padding: 16px; }
+  .card { background: #222; padding: 14px; margin: 12px 0; border-radius: 8px; }
+  button { padding: 10px 12px; border-radius: 6px; border: none; background: #4af; color: #000; cursor: pointer; font-weight: bold; }
+  button.active { background: #fa4; }
+  input[type=range] { width: 100%; margin-top: 8px; }
+  label { display: flex; justify-content: space-between; font-size: 14px; }
+  .file-input { margin-bottom: 20px; }
+  audio { width: 100%; margin-top: 10px; border-radius: 6px; }
+</style>
+</head>
+<body>
+
+<h1>Glitch Shifter — Web Simulation</h1>
+
+<div class="card file-input">
+  <label for="audioFile">Load Local Audio File:</label>
+  <input type="file" id="audioFile" accept="audio/*">
+  <audio id="audioPlayer" controls loop></audio>
+</div>
+
+<div class="card">
+  <label>Pitch (semitones) <span id="pitchVal">7</span></label>
+  <input id="pitch" type="range" min="-24" max="24" step="0.1" value="7">
+  <button id="bypassPitch" style="margin-top:10px;">Bypass Pitch</button>
+</div>
+
+<div class="card">
+  <label>Bitcrusher <span id="crushVal">0</span></label>
+  <input id="crush" type="range" min="0" max="1" step="0.01" value="0">
+  <button id="bypassCrush" style="margin-top:10px;">Bypass Crusher</button>
+</div>
+
+<div class="card">
+  <label>Reverb Room <span id="roomVal">0.9</span></label>
+  <input id="room" type="range" min="0" max="1" step="0.01" value="0.9">
+  <label style="margin-top:8px;">Reverb Damp <span id="dampVal">0.2</span></label>
+  <input id="damp" type="range" min="0" max="1" step="0.01" value="0.2">
+  <label style="margin-top:8px;">Reverb Wet <span id="wetVal">0.25</span></label>
+  <input id="wet" type="range" min="0" max="1" step="0.01" value="0.25">
+  <button id="bypassReverb" style="margin-top:10px;">Bypass Reverb</button>
+</div>
+
+<div class="card">
+  <button id="freezeBtn">Freeze</button>
+  <label style="margin-top:8px;">Freeze Normalize <span id="normVal">0.8</span></label>
+  <input id="norm" type="range" min="0" max="1" step="0.01" value="0.8">
+</div>
+
+<script>
+  let audioContext = null;
+  let workletNode = null;
+  let sourceNode = null;
+
+  const audioPlayer = document.getElementById('audioPlayer');
+  const fileInput = document.getElementById('audioFile');
+
+  // Parameters caching
+  const dspParams = {
+    pitch_semitones: 7.0,
+    crusher_amount: 0.0,
+    reverb_room: 0.9,
+    reverb_damp: 0.2,
+    reverb_wet: 0.25,
+    freeze: false,
+    freeze_norm: 0.8,
+    bypass_pitch: false,
+    bypass_crusher: false,
+    bypass_reverb: false
+  };
+
+  async function initAudio() {
+    if (!audioContext) {
+      audioContext = new (window.AudioContext || window.webkitAudioContext)();
+
+      try {
+        await audioContext.audioWorklet.addModule('dsp-processor.js');
+        workletNode = new AudioWorkletNode(audioContext, 'glitch-shifter-processor');
+
+        // Connect the node to destination
+        workletNode.connect(audioContext.destination);
+
+        // Send initial params
+        for (let key in dspParams) {
+          sendParam(key, dspParams[key]);
+        }
+      } catch (e) {
+        console.error("Failed to load audio worklet", e);
+        alert("Failed to load AudioWorklet. Ensure you are running this on a web server (e.g., http://localhost) and not directly from file://");
+      }
+    }
+
+    if (audioContext.state === 'suspended') {
+      await audioContext.resume();
+    }
+  }
+
+  function sendParam(key, val) {
+    if (workletNode) {
+      workletNode.port.postMessage({ type: 'param', key, val });
+    }
+  }
+
+  function bindSlider(id, paramKey) {
+    const el = document.getElementById(id);
+    el.addEventListener('input', () => {
+      const val = parseFloat(el.value);
+      document.getElementById(id + 'Val').innerText = val;
+      dspParams[paramKey] = val;
+      sendParam(paramKey, val);
+    });
+  }
+
+  bindSlider('pitch', 'pitch_semitones');
+  bindSlider('crush', 'crusher_amount');
+  bindSlider('room', 'reverb_room');
+  bindSlider('damp', 'reverb_damp');
+  bindSlider('wet', 'reverb_wet');
+  bindSlider('norm', 'freeze_norm');
+
+  function bindBypass(id, paramKey) {
+    const btn = document.getElementById(id);
+    btn.addEventListener('click', () => {
+      const isActive = btn.classList.toggle('active');
+      dspParams[paramKey] = isActive;
+      sendParam(paramKey, isActive);
+    });
+  }
+
+  bindBypass('bypassPitch', 'bypass_pitch');
+  bindBypass('bypassCrush', 'bypass_crusher');
+  bindBypass('bypassReverb', 'bypass_reverb');
+
+  const freezeBtn = document.getElementById('freezeBtn');
+  freezeBtn.addEventListener('click', () => {
+    const isActive = freezeBtn.classList.toggle('active');
+    dspParams['freeze'] = isActive;
+    sendParam('freeze', isActive);
+  });
+
+  let currentAudioUrl = null;
+
+  fileInput.addEventListener('change', async function() {
+    const file = this.files[0];
+    if (file) {
+      if (currentAudioUrl) {
+        URL.revokeObjectURL(currentAudioUrl);
+      }
+      currentAudioUrl = URL.createObjectURL(file);
+      audioPlayer.src = currentAudioUrl;
+    }
+  });
+
+  audioPlayer.addEventListener('play', async () => {
+    await initAudio();
+    if (!sourceNode && workletNode) {
+      // Create MediaElementAudioSourceNode only once
+      sourceNode = audioContext.createMediaElementSource(audioPlayer);
+      sourceNode.connect(workletNode);
+    }
+  });
+
+</script>
+</body>
+</html>
