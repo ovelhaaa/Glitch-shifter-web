@@ -65,8 +65,7 @@ class PitchShifter {
 
         // Ensure buffer is large enough for safe base delay + max travel
         // 16384 is approx 341ms at 48kHz, plenty of room for 50ms base delay and up to +12st grain travel.
-        if (!bufferSamples || bufferSamples <= 0) bufferSamples = 16384;
-        if (bufferSamples < 16384) bufferSamples = 16384;
+        if (!bufferSamples || bufferSamples < 16384) bufferSamples = 16384;
 
         this.sr = sampleRate;
         this.bufSize = bufferSamples;
