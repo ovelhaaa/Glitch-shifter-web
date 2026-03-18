@@ -226,7 +226,14 @@ class PitchShifter {
                 let over = grainTravel - softLimitStart;
                 // Softly limit so that as `over` goes to infinity, the addition goes to `absoluteMaxTravel - softLimitStart`
                 let maxOver = absoluteMaxTravel - softLimitStart;
-                grainTravel = softLimitStart + maxOver * Math.tanh(over / maxOver);
+
+                // If maxOver is zero or negative (which shouldn't happen with our constants, but defensive programming),
+                // we just clamp to softLimitStart to avoid division by zero or weird math.
+                if (maxOver > 0) {
+                    grainTravel = softLimitStart + maxOver * Math.tanh(over / maxOver);
+                } else {
+                    grainTravel = softLimitStart;
+                }
             }
 
             let readPos = currentWritePos - this.baseDelaySamples + grainTravel;
