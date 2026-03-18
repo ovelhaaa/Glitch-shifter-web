@@ -83,6 +83,7 @@ class PitchShifter {
         // Target 50ms grain size
         this.grainSizeSamples = Math.floor(this.sr * 0.050);
         if (this.grainSizeSamples < 128) this.grainSizeSamples = 128;
+        this.phaseInc = 1.0 / this.grainSizeSamples;
 
         // Base delay safely behind writer (~50ms) with a safety margin
         let calculatedBaseDelay = Math.floor(this.sr * 0.050);
@@ -182,9 +183,6 @@ class PitchShifter {
 
         if (++this.writePos >= this.bufSize) this.writePos = 0;
 
-        // Pitch smoothing (1st order LPF)
-        this.smoothedRate += (this.targetRate - this.smoothedRate) * this.smoothFactor;
-
         let rateTravel = currentRate - 1.0;
         let outSum = 0.0;
 
@@ -205,7 +203,7 @@ class PitchShifter {
             outSum += grainOut * grainWin;
 
             // Advance phase
-            this.phases[i] += phaseInc;
+            this.phases[i] += this.phaseInc;
 
             // Respawn grain silently when phase wraps
             if (this.phases[i] >= 1.0) {
