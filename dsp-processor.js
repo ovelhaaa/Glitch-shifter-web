@@ -71,8 +71,7 @@ class PitchShifter {
         // Ensure buffer is large enough for safe base delay + max travel
         // 32768 is approx 682ms at 48kHz, providing ample room for a conservative
         // base delay (~100ms) plus +/- 12st grain travel.
-        if (!bufferSamples || bufferSamples <= 0) bufferSamples = 32768;
-        if (bufferSamples < 32768) bufferSamples = 32768;
+        if (!bufferSamples || bufferSamples < 32768) bufferSamples = 32768;
 
         this.sr = sampleRate;
         // Make buffer slightly larger to safely read cubic interpolation points
