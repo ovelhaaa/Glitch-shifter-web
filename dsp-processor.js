@@ -182,11 +182,9 @@ class PitchShifter {
 
         if (++this.writePos >= this.bufSize) this.writePos = 0;
 
-        // Pitch smoothing (1st order LPF)
-        this.smoothedRate += (this.targetRate - this.smoothedRate) * this.smoothFactor;
-
         let rateTravel = currentRate - 1.0;
         let outSum = 0.0;
+        let phaseInc = 1.0 / this.grainSizeSamples;
 
         // Process all 4 grains
         for (let i = 0; i < 4; i++) {
