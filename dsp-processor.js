@@ -90,7 +90,7 @@ class PitchShifter {
         // Max travel = max(|(0-0.5)*grainSize*(-0.5)|, |(1-0.5)*grainSize*(1.0)|)
         // Max travel happens at rate=2.0: (1-0.5)*grainSize*1.0 = 0.5 * grainSize
         let maxTravel = Math.floor(0.5 * this.grainSizeSamples);
-        let safetyMargin = 512; // Extra padding
+        let safetyMargin = 64; // This margin must be smaller than `forbiddenZoneSamples` (256) for that logic to be active.
         this.baseDelaySamples = maxTravel + safetyMargin;
 
         // Reset phases
