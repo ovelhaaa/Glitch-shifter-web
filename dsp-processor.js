@@ -33,11 +33,9 @@ class BitCrusher {
     }
 }
 
-// PitchShifter redesigned as a real-time safe dual-grain overlap-add pitch shifter.
-// The old design used a hard switch/tap-swap that caused clicks because the
-// crossfade was abrupt and the phases were not continuously windowed.
-// This new design uses two grains, 180 degrees out of phase, with continuous
-// Hann windowing to ensure smooth overlapping without discontinuities.
+// PitchShifter redesigned as a real-time safe quad-grain overlap-add pitch shifter.
+// Uses 4 grains with continuous Hann windowing, cubic interpolation, pitch smoothing,
+// LFO modulation, and a robust forbidden-zone explicit check to avoid scraping the writer.
 class PitchShifter {
     constructor() {
         this.buf = null;
@@ -48,46 +46,63 @@ class PitchShifter {
         this.grainSizeSamples = 2048; // ~40ms at 48kHz
         this.baseDelaySamples = 2048; // Safe delay behind the writer
 
-        // Two grains, phases in [0, 1)
-        this.phaseA = 0.0;
-        this.phaseB = 0.5; // 180 degrees out of phase
+        // Four grains, phases uniformly distributed in [0, 1)
+        this.phases = [0.0, 0.25, 0.5, 0.75];
 
-        this.rate = 1.0;
+        this.targetRate = 1.0;
+        this.smoothedRate = 1.0;
+        this.smoothFactor = 0.002;
+
+        this.modDepthCents = 0.0;
+        this.modRateHz = 0.2;
+        this.modPhase = 0.0;
+
         this.active = false;
     }
 
     init(sampleRate, bufferSamples) {
-        // Handle invalid sample rate or buffer size safely
         if (!sampleRate || sampleRate <= 0) sampleRate = 48000;
-        if (!bufferSamples || bufferSamples <= 0) bufferSamples = 8192;
+
+        // Ensure buffer is large enough for safe base delay + max travel
+        // 16384 is approx 341ms at 48kHz, plenty of room for 50ms base delay and up to +12st grain travel.
+        if (!bufferSamples || bufferSamples <= 0) bufferSamples = 16384;
+        if (bufferSamples < 16384) bufferSamples = 16384;
 
         this.sr = sampleRate;
         this.bufSize = bufferSamples;
         this.buf = new Float32Array(this.bufSize + 4);
         this.writePos = 0;
 
-        // Setup grain geometry
         // Conservative default grain size: ~40ms
         this.grainSizeSamples = Math.floor(this.sr * 0.040);
         if (this.grainSizeSamples < 128) this.grainSizeSamples = 128;
 
         // Base delay safely behind writer
         let calculatedBaseDelay = Math.floor(this.sr * 0.050);
-        this.baseDelaySamples = Math.max(this.grainSizeSamples, calculatedBaseDelay);
+        let maxForwardTravel = this.grainSizeSamples * 1.0; // Max +12 semitones -> rate 2.0 -> travel = grainSize * 1.0
+        let minForbiddenZone = 256;
+
+        // Ensure the base delay handles maximum forward travel plus a safety margin
+        this.baseDelaySamples = Math.max(calculatedBaseDelay, Math.floor(maxForwardTravel + minForbiddenZone + 128));
 
         // Reset phases
-        this.phaseA = 0.0;
-        this.phaseB = 0.5;
+        this.phases = [0.0, 0.25, 0.5, 0.75];
+        this.modPhase = 0.0;
 
         this.active = true;
         return true;
     }
 
     setTransposition(semitones) {
-        // Clamp pitch shift range to a practical range, e.g., [-12, +12]
+        // Clamp pitch shift range conservatively: [-12, +12]
         if (semitones < -12.0) semitones = -12.0;
         if (semitones > 12.0) semitones = 12.0;
-        this.rate = Math.pow(2.0, semitones / 12.0);
+        this.targetRate = Math.pow(2.0, semitones / 12.0);
+    }
+
+    setModulation(depthCents, rateHz) {
+        this.modDepthCents = Math.max(0.0, Math.min(depthCents, 8.0));
+        this.modRateHz = Math.max(0.05, Math.min(rateHz, 1.5));
     }
 
     wrapIndex(pos) {
@@ -97,16 +112,34 @@ class PitchShifter {
     readInterpolated(pos) {
         let idx = Math.floor(pos);
         let frac = pos - idx;
+
+        // 4-point Hermite/Catmull-Rom cubic interpolation
+        let i0 = this.wrapIndex(idx - 1);
         let i1 = this.wrapIndex(idx);
         let i2 = this.wrapIndex(idx + 1);
-        let s1 = this.buf[i1];
-        let s2 = this.buf[i2];
-        return s1 + frac * (s2 - s1);
+        let i3 = this.wrapIndex(idx + 2);
+
+        let y0 = this.buf[i0];
+        let y1 = this.buf[i1];
+        let y2 = this.buf[i2];
+        let y3 = this.buf[i3];
+
+        let c0 = y1;
+        let c1 = 0.5 * (y2 - y0);
+        let c2 = y0 - 2.5 * y1 + 2.0 * y2 - 0.5 * y3;
+        let c3 = 0.5 * (y3 - y0) + 1.5 * (y1 - y2);
+
+        return ((c3 * frac + c2) * frac + c1) * frac + c0;
     }
 
     // Calculates the window amplitude for a given phase in [0, 1) using a Hann window
     getWindow(phase) {
         return 0.5 - 0.5 * Math.cos(2.0 * Math.PI * phase);
+    }
+
+    distanceToWriter(readPos, writePos) {
+        // Forward distance from readPos to writePos
+        return ((writePos - readPos) % this.bufSize + this.bufSize) % this.bufSize;
     }
 
     process(inp) {
@@ -118,38 +151,71 @@ class PitchShifter {
 
         if (++this.writePos >= this.bufSize) this.writePos = 0;
 
-        // Phase increment tied to grain duration
+        // Pitch smoothing (1st order LPF)
+        this.smoothedRate += (this.targetRate - this.smoothedRate) * this.smoothFactor;
+
+        // Subtle pitch modulation (LFO)
+        let lfo = 0.0;
+        if (this.modDepthCents > 0.0001) {
+            this.modPhase += (2.0 * Math.PI * this.modRateHz) / this.sr;
+            if (this.modPhase >= 2.0 * Math.PI) this.modPhase -= 2.0 * Math.PI;
+            lfo = Math.sin(this.modPhase);
+        }
+
+        let modCents = this.modDepthCents * lfo;
+        let modRatio = Math.pow(2.0, modCents / 1200.0);
+        let finalRate = this.smoothedRate * modRatio;
+
         let phaseInc = 1.0 / this.grainSizeSamples;
+        let rateTravel = finalRate - 1.0;
 
-        // Grain travel based on rate
-        // rate = 1.0 -> no shift, travel equals 0 (read head moves at exactly write speed)
-        // rate > 1.0 -> higher pitch, read head travels forward relative to write head
-        // rate < 1.0 -> lower pitch, read head travels backward relative to write head
-        let rateTravel = this.rate - 1.0;
+        let outSum = 0.0;
 
-        // Calculate read position for Grain A
-        let grainTravelA = this.phaseA * this.grainSizeSamples * rateTravel;
-        let readPosA = this.wrapIndex(currentWritePos - this.baseDelaySamples + grainTravelA);
-        let outA = this.readInterpolated(readPosA);
-        let winA = this.getWindow(this.phaseA);
+        for (let i = 0; i < 4; i++) {
+            let p = this.phases[i];
+            let grainTravel = p * this.grainSizeSamples * rateTravel;
 
-        // Calculate read position for Grain B
-        let grainTravelB = this.phaseB * this.grainSizeSamples * rateTravel;
-        let readPosB = this.wrapIndex(currentWritePos - this.baseDelaySamples + grainTravelB);
-        let outB = this.readInterpolated(readPosB);
-        let winB = this.getWindow(this.phaseB);
+            let rawReadPos = currentWritePos - this.baseDelaySamples + grainTravel;
+            let readPos = this.wrapIndex(rawReadPos);
 
-        let out = outA * winA + outB * winB;
+            let win = this.getWindow(p);
+            let dist = this.distanceToWriter(readPos, currentWritePos);
 
-        // Advance phases
-        this.phaseA += phaseInc;
-        this.phaseB += phaseInc;
+            // Forbidden zone check (min 256 samples margin)
+            if (dist < 256) {
+                // Read head is too close behind writer
+                if (win < 0.05) {
+                    // Safe respawn near zero gain
+                    this.phases[i] = 0.0;
+                    readPos = this.wrapIndex(currentWritePos - this.baseDelaySamples);
+                    win = this.getWindow(0.0);
+                } else {
+                    // Soft correction: clamp to forbidden zone edge to gracefully stall and avoid jumping
+                    readPos = this.wrapIndex(currentWritePos - 256);
+                }
+            } else if (dist > this.bufSize - 256) {
+                // Read head overtook writer and is reading into the "future" (oldest data)
+                if (win < 0.05) {
+                    // Safe respawn
+                    this.phases[i] = 0.0;
+                    readPos = this.wrapIndex(currentWritePos - this.baseDelaySamples);
+                    win = this.getWindow(0.0);
+                } else {
+                    // Soft correction: stay at the safe edge ahead of the writer
+                    readPos = this.wrapIndex(currentWritePos + 256);
+                }
+            }
 
-        // Respawn grains silently when phase wraps
-        if (this.phaseA >= 1.0) this.phaseA -= 1.0;
-        if (this.phaseB >= 1.0) this.phaseB -= 1.0;
+            outSum += this.readInterpolated(readPos) * win;
 
-        return out;
+            // Advance phase
+            this.phases[i] += phaseInc;
+            if (this.phases[i] >= 1.0) this.phases[i] -= 1.0;
+        }
+
+        // For 4 Hann windows spaced by 0.25, the constant sum is 2.0,
+        // so we divide by 2.0 (multiply by 0.5) to normalize gain.
+        return outSum * 0.5;
     }
 }
 
@@ -351,6 +417,8 @@ class GlitchShifterProcessor extends AudioWorkletProcessor {
 
         this.params = {
             pitch_semitones: 7.0,
+            pitch_mod_depth_cents: 0.0,
+            pitch_mod_rate_hz: 0.2,
             pitch_mix: 1.0,
             reverb_room: 0.9,
             reverb_damp: 0.2,
@@ -372,7 +440,11 @@ class GlitchShifterProcessor extends AudioWorkletProcessor {
 
                 if (this.initialized) {
                     switch (key) {
-                        case 'pitch_semitones': this.shifter.setTransposition(Math.round(val)); break;
+                        case 'pitch_semitones': this.shifter.setTransposition(val); break;
+                        case 'pitch_mod_depth_cents':
+                        case 'pitch_mod_rate_hz':
+                            this.shifter.setModulation(this.params.pitch_mod_depth_cents, this.params.pitch_mod_rate_hz);
+                            break;
                         case 'reverb_room': this.reverb.setRoom(val); break;
                         case 'reverb_damp': this.reverb.setDamp(val); break;
                         case 'reverb_wet': this.reverb.setWet(val); break;
@@ -387,8 +459,9 @@ class GlitchShifterProcessor extends AudioWorkletProcessor {
 
     process(inputs, outputs, parameters) {
         if (!this.initialized) {
-            this.shifter.init(sampleRate, 8192);
-            this.shifter.setTransposition(Math.round(this.params.pitch_semitones));
+            this.shifter.init(sampleRate, 16384);
+            this.shifter.setTransposition(this.params.pitch_semitones);
+            this.shifter.setModulation(this.params.pitch_mod_depth_cents, this.params.pitch_mod_rate_hz);
 
             this.reverb.init(sampleRate);
             this.reverb.setRoom(this.params.reverb_room);
