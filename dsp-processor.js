@@ -69,9 +69,10 @@ class PitchShifter {
         if (!sampleRate || sampleRate <= 0) sampleRate = 48000;
 
         // Ensure buffer is large enough for safe base delay + max travel
-        // 16384 is approx 341ms at 48kHz, plenty of room for 50ms base delay and up to +12st grain travel.
-        if (!bufferSamples || bufferSamples <= 0) bufferSamples = 16384;
-        if (bufferSamples < 16384) bufferSamples = 16384;
+        // 32768 is approx 682ms at 48kHz, providing ample room for a conservative
+        // base delay (~100ms) plus +/- 12st grain travel.
+        if (!bufferSamples || bufferSamples <= 0) bufferSamples = 32768;
+        if (bufferSamples < 32768) bufferSamples = 32768;
 
         this.sr = sampleRate;
         // Make buffer slightly larger to safely read cubic interpolation points
@@ -85,13 +86,22 @@ class PitchShifter {
         if (this.grainSizeSamples < 128) this.grainSizeSamples = 128;
         this.phaseInc = 1.0 / this.grainSizeSamples;
 
-        // Base delay strictly calculated for maximum safe excursion.
-        // Pitch bounds: -12st (rate=0.5) to +12st (rate=2.0)
-        // Max travel = max(|(0-0.5)*grainSize*(-0.5)|, |(1-0.5)*grainSize*(1.0)|)
-        // Max travel happens at rate=2.0: (1-0.5)*grainSize*1.0 = 0.5 * grainSize
-        let maxTravel = Math.floor(0.5 * this.grainSizeSamples);
-        let safetyMargin = 64; // This margin must be smaller than `forbiddenZoneSamples` (256) for that logic to be active.
-        this.baseDelaySamples = maxTravel + safetyMargin;
+        // The previous metallic/ring-mod sound was caused by `baseDelaySamples`
+        // being too small. When a grain traveled backwards, it hit the write head
+        // and got hard-clamped. This essentially froze the read pointer, turning the
+        // pitch shifter into a static delay, which creates comb-filtering sidebands
+        // and a harsh metallic character.
+        // We now set a conservative base delay to ensure the read pointer almost
+        // NEVER touches the forbidden zone during normal [-12, +12] st operation.
+        // Base delay = max(~50ms, grainSize + 256).
+        let minBaseDelay = Math.round(this.sr * 0.050);
+        this.baseDelaySamples = Math.max(minBaseDelay, this.grainSizeSamples + 256);
+
+        // At rate=2.0 (+12st), maximum forward excursion is 0.5 * grainSize * (2.0 - 1.0) = 0.5 * grainSize.
+        // At rate=0.5 (-12st), maximum backward excursion is -0.5 * grainSize * (0.5 - 1.0) = +0.25 * grainSize.
+        // Since baseDelay is >= grainSize + 256, even at max forward excursion (0.5 * grainSize),
+        // the read pointer is still baseDelay - 0.5*grainSize >= 0.5*grainSize + 256 samples behind the write head.
+        // This guarantees a massive safety margin, completely avoiding the hard clamp under normal conditions.
 
         // Reset phases
         this.phases = [0.0, 0.5];
@@ -197,24 +207,50 @@ class PitchShifter {
             // Calculate read position for current Grain
             // Anchored geometry: at the center of the window (p = 0.5), the delay is exactly baseDelaySamples.
             let grainTravel = (p - 0.5) * this.grainSizeSamples * rateTravel;
+
+            // To ensure safety smoothly, we introduce a soft constraint to the grainTravel itself.
+            // Under normal operation, the increased baseDelay completely avoids the forbidden zone.
+            // If somehow the pitch/modulation drives the pointer into the forbidden zone (e.g. rate jump),
+            // instead of hard-clamping `readPos`, we compress `grainTravel` so it moves less abruptly.
+            const forbiddenZoneSamples = 256;
+            let absoluteMaxTravel = this.baseDelaySamples - forbiddenZoneSamples;
+            let softLimitStart = absoluteMaxTravel - 256; // Start compressing 256 samples *before* the absolute max
+
+            // Soft clipping `grainTravel` so it never exceeds `absoluteMaxTravel`
+            // if we exceed safe boundaries. This preserves motion and avoids static freezing.
+            if (grainTravel > softLimitStart) {
+                // Apply soft limiting
+                let over = grainTravel - softLimitStart;
+                // Softly limit so that as `over` goes to infinity, the addition goes to `absoluteMaxTravel - softLimitStart`
+                let maxOver = absoluteMaxTravel - softLimitStart;
+                grainTravel = softLimitStart + maxOver * Math.tanh(over / maxOver);
+            }
+
             let readPos = currentWritePos - this.baseDelaySamples + grainTravel;
 
+            // In our circular buffer, `readPos` can be positive or negative depending on currentWritePos.
+            // We must wrap it *before* distance checks.
+            readPos = this.wrapIndex(readPos);
+
+            // Final safety net: if we STILL breach the forbidden zone, check if we can respawn.
+            // Hard jumps create metallic comb-filtering, so we only respawn if the window is silent.
             let dist = this.distanceToWriter(readPos, currentWritePos);
-
-            // Forbidden zone explicit protection
-            const forbiddenZoneSamples = 256;
-
             let grainWin = this.getWindow(p);
 
-            // If we are getting too close to the writer (less than forbiddenZoneSamples),
             if (dist < forbiddenZoneSamples) {
-                // To protect the grain from overrunning the write head while preserving the strict
-                // 0.5 phase offset required for 2-grain unity gain sum, we freeze the read pointer
-                // relative to the write pointer (effective rate = 1.0).
-                // We maintain the safe distance until the grain naturally phases out and wraps around.
-                // We NEVER manually jump this.phases[i] by 0.5, as that would cause the two grains
-                // to collide and create extreme amplitude modulation.
-                readPos = this.wrapIndex(currentWritePos - forbiddenZoneSamples);
+                // If it's near zero gain, we can safely and silently push the pointer back to the center baseDelay.
+                if (grainWin < 0.001) {
+                    readPos = this.wrapIndex(currentWritePos - this.baseDelaySamples);
+                } else {
+                    // Otherwise we must do a hard limit as an absolute last resort, but this is extremely rare now.
+                    // If we get too close, rather than freezing at `currentWritePos - forbiddenZoneSamples`,
+                    // we smoothly apply a soft curve so the readPos approaches the boundary asymptotically.
+                    // But for simplicity and to avoid overcomplicating the DSP, we just limit it.
+                    // Note: `dist` is the forward distance from read to write.
+                    // So readPos is `dist` samples behind writePos.
+                    // We want it to be at least `forbiddenZoneSamples` behind.
+                    readPos = this.wrapIndex(currentWritePos - forbiddenZoneSamples);
+                }
             }
 
             // Final defensive check against NaN/Infinity before reading
