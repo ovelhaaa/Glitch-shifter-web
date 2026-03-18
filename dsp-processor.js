@@ -57,6 +57,9 @@ class PitchShifter {
         this.modRateHz = 0.2;
         this.modPhase = 0.0;
 
+        this.minForbiddenZone = 256;
+        this.safeRespawnWindowThreshold = 0.05;
+
         this.active = false;
     }
 
@@ -65,7 +68,8 @@ class PitchShifter {
 
         // Ensure buffer is large enough for safe base delay + max travel
         // 16384 is approx 341ms at 48kHz, plenty of room for 50ms base delay and up to +12st grain travel.
-        if (!bufferSamples || bufferSamples < 16384) bufferSamples = 16384;
+        if (!bufferSamples || bufferSamples <= 0) bufferSamples = 16384;
+        if (bufferSamples < 16384) bufferSamples = 16384;
 
         this.sr = sampleRate;
         this.bufSize = bufferSamples;
@@ -79,10 +83,9 @@ class PitchShifter {
         // Base delay safely behind writer
         let calculatedBaseDelay = Math.floor(this.sr * 0.050);
         let maxForwardTravel = this.grainSizeSamples * 1.0; // Max +12 semitones -> rate 2.0 -> travel = grainSize * 1.0
-        let minForbiddenZone = 256;
 
         // Ensure the base delay handles maximum forward travel plus a safety margin
-        this.baseDelaySamples = Math.max(calculatedBaseDelay, Math.floor(maxForwardTravel + minForbiddenZone + 128));
+        this.baseDelaySamples = Math.max(calculatedBaseDelay, Math.floor(maxForwardTravel + this.minForbiddenZone + 128));
 
         // Reset phases
         this.phases = [0.0, 0.25, 0.5, 0.75];
@@ -180,28 +183,28 @@ class PitchShifter {
             let win = this.getWindow(p);
             let dist = this.distanceToWriter(readPos, currentWritePos);
 
-            // Forbidden zone check (min 256 samples margin)
-            if (dist < 256) {
+            // Forbidden zone check
+            if (dist < this.minForbiddenZone) {
                 // Read head is too close behind writer
-                if (win < 0.05) {
+                if (win < this.safeRespawnWindowThreshold) {
                     // Safe respawn near zero gain
                     this.phases[i] = 0.0;
                     readPos = this.wrapIndex(currentWritePos - this.baseDelaySamples);
                     win = this.getWindow(0.0);
                 } else {
                     // Soft correction: clamp to forbidden zone edge to gracefully stall and avoid jumping
-                    readPos = this.wrapIndex(currentWritePos - 256);
+                    readPos = this.wrapIndex(currentWritePos - this.minForbiddenZone);
                 }
-            } else if (dist > this.bufSize - 256) {
+            } else if (dist > this.bufSize - this.minForbiddenZone) {
                 // Read head overtook writer and is reading into the "future" (oldest data)
-                if (win < 0.05) {
+                if (win < this.safeRespawnWindowThreshold) {
                     // Safe respawn
                     this.phases[i] = 0.0;
                     readPos = this.wrapIndex(currentWritePos - this.baseDelaySamples);
                     win = this.getWindow(0.0);
                 } else {
                     // Soft correction: stay at the safe edge ahead of the writer
-                    readPos = this.wrapIndex(currentWritePos + 256);
+                    readPos = this.wrapIndex(currentWritePos + this.minForbiddenZone);
                 }
             }
 
@@ -322,10 +325,14 @@ class MonoFreeverb {
         for (let i = 0; i < 8; i++) this.comb[i].setFeedback(r);
     }
     setDamp(d) {
+        if (d > 1.0) d = 1.0;
+        if (d < 0.0) d = 0.0;
         this.damp = d;
         for (let i = 0; i < 8; i++) this.comb[i].setDamp(d);
     }
     setWet(w) {
+        if (w > 1.0) w = 1.0;
+        if (w < 0.0) w = 0.0;
         this.wet = w;
         this.dry = 1.0 - w;
     }
@@ -334,8 +341,8 @@ class MonoFreeverb {
 
     setFreeze(f) {
         if (f && !this.freeze) {
-            // Use safer near-unity value instead of 1.0 to prevent infinite build-up
-            for (let i = 0; i < 8; i++) this.comb[i].setFeedback(0.9999);
+            // Use an even safer near-unity value instead of 0.9999 to prevent infinite build-up and clipping
+            for (let i = 0; i < 8; i++) this.comb[i].setFeedback(0.9995);
             this.freezePeak = 1e-6;
         } else if (!f && this.freeze) {
             for (let i = 0; i < 8; i++) this.comb[i].setFeedback(this.savedRoom);
