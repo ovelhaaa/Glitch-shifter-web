@@ -66,9 +66,12 @@ class PitchShifter {
     }
 
     init(sampleRate, bufferSamples) {
-        // Handle invalid sample rate or buffer size safely
         if (!sampleRate || sampleRate <= 0) sampleRate = 48000;
-        if (!bufferSamples || bufferSamples <= 0) bufferSamples = 8192;
+
+        // Ensure buffer is large enough for safe base delay + max travel
+        // 16384 is approx 341ms at 48kHz, plenty of room for 50ms base delay and up to +12st grain travel.
+        if (!bufferSamples || bufferSamples <= 0) bufferSamples = 16384;
+        if (bufferSamples < 16384) bufferSamples = 16384;
 
         this.sr = sampleRate;
         // Make buffer slightly larger to safely read cubic interpolation points
@@ -97,7 +100,7 @@ class PitchShifter {
     }
 
     setTransposition(semitones) {
-        // Clamp pitch shift range to a practical range, e.g., [-12, +12]
+        // Clamp pitch shift range conservatively: [-12, +12]
         if (semitones < -12.0) semitones = -12.0;
         if (semitones > 12.0) semitones = 12.0;
         this.targetRate = Math.pow(2.0, semitones / 12.0);
@@ -146,6 +149,11 @@ class PitchShifter {
         return 0.5 - 0.5 * Math.cos(2.0 * Math.PI * phase);
     }
 
+    distanceToWriter(readPos, writePos) {
+        // Forward distance from readPos to writePos
+        return ((writePos - readPos) % this.bufSize + this.bufSize) % this.bufSize;
+    }
+
     process(inp) {
         if (!this.active || !this.buf) return inp;
 
@@ -174,8 +182,8 @@ class PitchShifter {
 
         if (++this.writePos >= this.bufSize) this.writePos = 0;
 
-        // Phase increment tied to grain duration
-        let phaseInc = 1.0 / this.grainSizeSamples;
+        // Pitch smoothing (1st order LPF)
+        this.smoothedRate += (this.targetRate - this.smoothedRate) * this.smoothFactor;
 
         let rateTravel = currentRate - 1.0;
         let outSum = 0.0;
@@ -315,10 +323,14 @@ class MonoFreeverb {
         for (let i = 0; i < 8; i++) this.comb[i].setFeedback(r);
     }
     setDamp(d) {
+        if (d > 1.0) d = 1.0;
+        if (d < 0.0) d = 0.0;
         this.damp = d;
         for (let i = 0; i < 8; i++) this.comb[i].setDamp(d);
     }
     setWet(w) {
+        if (w > 1.0) w = 1.0;
+        if (w < 0.0) w = 0.0;
         this.wet = w;
         this.dry = 1.0 - w;
     }
@@ -327,8 +339,8 @@ class MonoFreeverb {
 
     setFreeze(f) {
         if (f && !this.freeze) {
-            // Use safer near-unity value instead of 1.0 to prevent infinite build-up
-            for (let i = 0; i < 8; i++) this.comb[i].setFeedback(0.9999);
+            // Use an even safer near-unity value instead of 0.9999 to prevent infinite build-up and clipping
+            for (let i = 0; i < 8; i++) this.comb[i].setFeedback(0.9995);
             this.freezePeak = 1e-6;
         } else if (!f && this.freeze) {
             for (let i = 0; i < 8; i++) this.comb[i].setFeedback(this.savedRoom);
