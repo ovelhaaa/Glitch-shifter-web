@@ -71,7 +71,8 @@ class PitchShifter {
         // Ensure buffer is large enough for safe base delay + max travel
         // 32768 is approx 682ms at 48kHz, providing ample room for a conservative
         // base delay (~100ms) plus +/- 12st grain travel.
-        if (!bufferSamples || bufferSamples < 32768) bufferSamples = 32768;
+        if (!bufferSamples || bufferSamples <= 0) bufferSamples = 32768;
+        if (bufferSamples < 32768) bufferSamples = 32768;
 
         this.sr = sampleRate;
         // Make buffer slightly larger to safely read cubic interpolation points
@@ -212,8 +213,11 @@ class PitchShifter {
             // If somehow the pitch/modulation drives the pointer into the forbidden zone (e.g. rate jump),
             // instead of hard-clamping `readPos`, we compress `grainTravel` so it moves less abruptly.
             const forbiddenZoneSamples = 256;
+            const softLimitMarginSamples = 256;
+            const silentWindowThreshold = 0.001;
+
             let absoluteMaxTravel = this.baseDelaySamples - forbiddenZoneSamples;
-            let softLimitStart = absoluteMaxTravel - 256; // Start compressing 256 samples *before* the absolute max
+            let softLimitStart = absoluteMaxTravel - softLimitMarginSamples; // Start compressing before the absolute max
 
             // Soft clipping `grainTravel` so it never exceeds `absoluteMaxTravel`
             // if we exceed safe boundaries. This preserves motion and avoids static freezing.
@@ -238,7 +242,7 @@ class PitchShifter {
 
             if (dist < forbiddenZoneSamples) {
                 // If it's near zero gain, we can safely and silently push the pointer back to the center baseDelay.
-                if (grainWin < 0.001) {
+                if (grainWin < silentWindowThreshold) {
                     readPos = this.wrapIndex(currentWritePos - this.baseDelaySamples);
                 } else {
                     // Otherwise we must do a hard limit as an absolute last resort, but this is extremely rare now.
