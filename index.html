@@ -75,6 +75,18 @@
       <label>Mix <span class="val-display" id="pitchMixVal">1.00</span></label>
       <input id="pitchMix" type="range" min="0" max="1" step="0.01" value="1.0">
     </div>
+
+    <hr style="border-color: #333; margin: 12px 0;">
+
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+      <span style="font-size: 14px; font-weight: bold; color: #bbb;">Diffusion Allpass</span>
+      <button id="bypassPitchAllpass" class="bypass-btn active" style="padding: 4px 8px; font-size: 12px;">Bypassed</button>
+    </div>
+
+    <div class="control-group">
+      <label>Feedback <span class="val-display" id="pitchAllpassFeedbackVal">0.50</span></label>
+      <input id="pitchAllpassFeedback" type="range" min="0" max="0.99" step="0.01" value="0.5">
+    </div>
   </div>
 
   <div class="card">
@@ -145,6 +157,8 @@
     pitch_mod_depth_cents: 0.0,
     pitch_mod_rate_hz: 0.2,
     pitch_mix: 1.0,
+    pitch_allpass_active: false,
+    pitch_allpass_feedback: 0.5,
     crusher_amount: 0.0,
     crusher_mix: 1.0,
     reverb_room: 0.9,
@@ -213,6 +227,7 @@
   bindSlider('pitchModDepth', 'pitch_mod_depth_cents');
   bindSlider('pitchModRate', 'pitch_mod_rate_hz');
   bindSlider('pitchMix', 'pitch_mix');
+  bindSlider('pitchAllpassFeedback', 'pitch_allpass_feedback');
   bindSlider('crush', 'crusher_amount');
   bindSlider('crushMix', 'crusher_mix');
   bindSlider('room', 'reverb_room');
@@ -233,6 +248,21 @@
   bindBypass('bypassPitch', 'bypass_pitch');
   bindBypass('bypassCrush', 'bypass_crusher');
   bindBypass('bypassReverb', 'bypass_reverb');
+
+  // Specific bypass logic for allpass (since its boolean logic is flipped compared to 'bypass' buttons,
+  // where active in DSP means processing, and bypassed means not processing.
+  // The general `bindBypass` assumes true = bypassed. Let's make a custom binder or reuse the logic).
+  const btnAllpass = document.getElementById('bypassPitchAllpass');
+  btnAllpass.addEventListener('click', () => {
+    // If it has 'active' class, it means it is currently Bypassed (red).
+    // We want to turn it ON (gray/normal).
+    const isBypassed = btnAllpass.classList.toggle('active');
+    btnAllpass.innerText = isBypassed ? 'Bypassed' : 'Active';
+    // DSP param expects 'true' to activate the allpasses. So we invert isBypassed.
+    const isProcessing = !isBypassed;
+    dspParams['pitch_allpass_active'] = isProcessing;
+    sendParam('pitch_allpass_active', isProcessing);
+  });
 
   const freezeBtn = document.getElementById('freezeBtn');
   freezeBtn.addEventListener('click', () => {

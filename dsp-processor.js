@@ -62,6 +62,13 @@ class PitchShifter {
         this.modPhase = 0.0;
         this.smoothedModDepth = 0.0;
 
+        // Allpass section for diffusion
+        this.allpassActive = false;
+        this.allpasses = [];
+        for (let i = 0; i < 3; i++) {
+            this.allpasses.push(new Allpass());
+        }
+
         this.active = false;
     }
 
@@ -109,8 +116,28 @@ class PitchShifter {
         // Reset modulation
         this.modPhase = 0.0;
 
+        // Initialize 3 short prime-based allpasses (sizes relative to 44.1kHz)
+        // Adjust prime sizes to sample rate. Typical small diffusion sizes: 227, 347, 443
+        const primeSizes = [227, 347, 443];
+        for (let i = 0; i < 3; i++) {
+            let apSize = Math.floor(primeSizes[i] * (this.sr / 44100.0));
+            // Ensure size is at least 1
+            if (apSize < 1) apSize = 1;
+            this.allpasses[i].init(apSize);
+            this.allpasses[i].feedback = 0.5; // Default feedback
+        }
+
         this.active = true;
         return true;
+    }
+
+    setAllpass(active, feedback) {
+        this.allpassActive = active;
+        // Clamp feedback to safe bounds
+        let fb = Math.max(0.0, Math.min(feedback, 0.98));
+        for (let i = 0; i < 3; i++) {
+            this.allpasses[i].feedback = fb;
+        }
     }
 
     setTransposition(semitones) {
@@ -275,6 +302,13 @@ class PitchShifter {
             // Respawn grain silently when phase wraps
             if (this.phases[i] >= 1.0) {
                 this.phases[i] -= 1.0;
+            }
+        }
+
+        // Apply short allpasses for diffusion (metallic reduction)
+        if (this.allpassActive) {
+            for (let i = 0; i < 3; i++) {
+                outSum = this.allpasses[i].process(outSum);
             }
         }
 
@@ -489,6 +523,8 @@ class GlitchShifterProcessor extends AudioWorkletProcessor {
             pitch_mod_depth_cents: 0.0,
             pitch_mod_rate_hz: 0.2,
             pitch_mix: 1.0,
+            pitch_allpass_active: false,
+            pitch_allpass_feedback: 0.5,
             reverb_room: 0.9,
             reverb_damp: 0.2,
             reverb_wet: 0.25,
@@ -514,6 +550,10 @@ class GlitchShifterProcessor extends AudioWorkletProcessor {
                         case 'pitch_mod_rate_hz':
                             this.shifter.setModulation(this.params.pitch_mod_depth_cents, this.params.pitch_mod_rate_hz);
                             break;
+                        case 'pitch_allpass_active':
+                        case 'pitch_allpass_feedback':
+                            this.shifter.setAllpass(this.params.pitch_allpass_active, this.params.pitch_allpass_feedback);
+                            break;
                         case 'reverb_room': this.reverb.setRoom(val); break;
                         case 'reverb_damp': this.reverb.setDamp(val); break;
                         case 'reverb_wet': this.reverb.setWet(val); break;
@@ -531,6 +571,7 @@ class GlitchShifterProcessor extends AudioWorkletProcessor {
             this.shifter.init(sampleRate, 8192);
             this.shifter.setTransposition(this.params.pitch_semitones);
             this.shifter.setModulation(this.params.pitch_mod_depth_cents, this.params.pitch_mod_rate_hz);
+            this.shifter.setAllpass(this.params.pitch_allpass_active, this.params.pitch_allpass_feedback);
 
             this.reverb.init(sampleRate);
             this.reverb.setRoom(this.params.reverb_room);
