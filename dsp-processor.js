@@ -65,9 +65,13 @@ class PitchShifter {
         // Allpass section for diffusion
         this.allpassActive = false;
         this.allpasses = [];
-        for (let i = 0; i < 3; i++) {
+        // Only 1 allpass, used as a subtle diffusion blend, not a harsh series block
+        for (let i = 0; i < 1; i++) {
             this.allpasses.push(new Allpass());
         }
+
+        // Post-shifter smoothing lowpass filter state
+        this.lpState = 0.0;
 
         this.active = false;
     }
@@ -88,8 +92,8 @@ class PitchShifter {
         this.writePos = 0;
 
         // Setup grain geometry for maximum smoothness
-        // Target 50ms grain size
-        this.grainSizeSamples = Math.floor(this.sr * 0.050);
+        // Target 60ms grain size for a smoother, less chattering response
+        this.grainSizeSamples = Math.floor(this.sr * 0.060);
         if (this.grainSizeSamples < 128) this.grainSizeSamples = 128;
         this.phaseInc = 1.0 / this.grainSizeSamples;
 
@@ -98,11 +102,11 @@ class PitchShifter {
         // and got hard-clamped. This essentially froze the read pointer, turning the
         // pitch shifter into a static delay, which creates comb-filtering sidebands
         // and a harsh metallic character.
-        // We now set a conservative base delay to ensure the read pointer almost
+        // We now set a very conservative base delay to ensure the read pointer almost
         // NEVER touches the forbidden zone during normal [-12, +12] st operation.
-        // Base delay = max(~50ms, grainSize + 256).
-        let minBaseDelay = Math.round(this.sr * 0.050);
-        this.baseDelaySamples = Math.max(minBaseDelay, this.grainSizeSamples + 256);
+        // Base delay = max(~60ms, grainSize + 512).
+        let minBaseDelay = Math.round(this.sr * 0.060);
+        this.baseDelaySamples = Math.max(minBaseDelay, this.grainSizeSamples + 512);
 
         // At rate=2.0 (+12st), maximum forward excursion is 0.5 * grainSize * (2.0 - 1.0) = 0.5 * grainSize.
         // At rate=0.5 (-12st), maximum backward excursion is -0.5 * grainSize * (0.5 - 1.0) = +0.25 * grainSize.
@@ -116,16 +120,16 @@ class PitchShifter {
         // Reset modulation
         this.modPhase = 0.0;
 
-        // Initialize 3 short prime-based allpasses (sizes relative to 44.1kHz)
-        // Adjust prime sizes to sample rate. Typical small diffusion sizes: 227, 347, 443
-        const primeSizes = [227, 347, 443];
+        // Initialize 1 short prime-based allpass (size relative to 44.1kHz)
+        // Adjust prime size to sample rate. Typical small diffusion size: 227
+        const primeSizes = [227];
         const srRatio = this.sr / 44100.0;
-        for (let i = 0; i < 3; i++) {
+        for (let i = 0; i < 1; i++) {
             let apSize = Math.floor(primeSizes[i] * srRatio);
             // Ensure size is at least 1
             if (apSize < 1) apSize = 1;
             this.allpasses[i].init(apSize);
-            this.allpasses[i].feedback = 0.5; // Default feedback
+            this.allpasses[i].feedback = 0.15; // Low default feedback
         }
 
         this.active = true;
@@ -134,9 +138,10 @@ class PitchShifter {
 
     setAllpass(active, feedback) {
         this.allpassActive = active;
-        // Clamp feedback to safe bounds
-        let fb = Math.max(0.0, Math.min(feedback, 0.98));
-        for (let i = 0; i < 3; i++) {
+        // Clamp feedback to safe bounds, keeping it strictly subtle (e.g. max 0.25)
+        // to prevent metallic ringing when used purely for light diffusion.
+        let fb = Math.max(0.0, Math.min(feedback, 0.25));
+        for (let i = 0; i < this.allpasses.length; i++) {
             this.allpasses[i].feedback = fb;
         }
     }
@@ -247,21 +252,21 @@ class PitchShifter {
             let absoluteMaxTravel = this.baseDelaySamples - forbiddenZoneSamples;
             let softLimitStart = absoluteMaxTravel - softLimitMarginSamples; // Start compressing before the absolute max
 
-            // Soft clipping `grainTravel` so it never exceeds `absoluteMaxTravel`
-            // if we exceed safe boundaries. This preserves motion and avoids static freezing.
-            if (grainTravel > softLimitStart) {
-                // Apply soft limiting
-                let over = grainTravel - softLimitStart;
-                // Softly limit so that as `over` goes to infinity, the addition goes to `absoluteMaxTravel - softLimitStart`
+            // Symmetrical soft clipping of `grainTravel` magnitude to ensure coherent behavior
+            // across both forward and backward pitch adjustments.
+            let absTravel = Math.abs(grainTravel);
+            let signTravel = grainTravel < 0 ? -1.0 : 1.0;
+
+            if (absTravel > softLimitStart) {
+                let over = absTravel - softLimitStart;
                 let maxOver = absoluteMaxTravel - softLimitStart;
 
-                // If maxOver is zero or negative (which shouldn't happen with our constants, but defensive programming),
-                // we just clamp to softLimitStart to avoid division by zero or weird math.
                 if (maxOver > 0) {
-                    grainTravel = softLimitStart + maxOver * Math.tanh(over / maxOver);
+                    absTravel = softLimitStart + maxOver * Math.tanh(over / maxOver);
                 } else {
-                    grainTravel = softLimitStart;
+                    absTravel = softLimitStart;
                 }
+                grainTravel = absTravel * signTravel;
             }
 
             let readPos = currentWritePos - this.baseDelaySamples + grainTravel;
@@ -276,18 +281,23 @@ class PitchShifter {
             let grainWin = this.getWindow(p);
 
             if (dist < forbiddenZoneSamples) {
-                // If it's near zero gain, we can safely and silently push the pointer back to the center baseDelay.
+                // If the grain is essentially silent, we can safely and silently reset the pointer
+                // back to the stable center baseDelay without introducing pops or clicks.
                 if (grainWin < silentWindowThreshold) {
                     readPos = this.wrapIndex(currentWritePos - this.baseDelaySamples);
                 } else {
-                    // Otherwise we must do a hard limit as an absolute last resort, but this is extremely rare now.
-                    // If we get too close, rather than freezing at `currentWritePos - forbiddenZoneSamples`,
-                    // we smoothly apply a soft curve so the readPos approaches the boundary asymptotically.
-                    // But for simplicity and to avoid overcomplicating the DSP, we just limit it.
-                    // Note: `dist` is the forward distance from read to write.
-                    // So readPos is `dist` samples behind writePos.
-                    // We want it to be at least `forbiddenZoneSamples` behind.
-                    readPos = this.wrapIndex(currentWritePos - forbiddenZoneSamples);
+                    // If not silent, we avoid the old behavior of a hard fallback to exactly
+                    // `currentWritePos - forbiddenZoneSamples` as a normal occurrence,
+                    // because that static freezing creates metallic comb-filtering.
+                    // The symmetric `grainTravel` limit above should prevent this, but as an
+                    // extreme final safety net to prevent buffer collision (reading the write head):
+                    // we just enforce an absolute bare minimum gap without a hard jump if possible,
+                    // or gracefully slide. For true real-time safety with zero allocations,
+                    // we do a much lighter clamp to a smaller emergency margin.
+                    const extremeSafetyGap = 32;
+                    if (dist < extremeSafetyGap) {
+                        readPos = this.wrapIndex(currentWritePos - extremeSafetyGap);
+                    }
                 }
             }
 
@@ -306,12 +316,21 @@ class PitchShifter {
             }
         }
 
-        // Apply short allpasses for diffusion (metallic reduction)
-        if (this.allpassActive) {
-            for (let i = 0; i < this.allpasses.length; i++) {
-                outSum = this.allpasses[i].process(outSum);
-            }
+        // Apply short allpass for subtle diffusion
+        // Blended to prevent completely washing out or coloring the primary signal
+        if (this.allpassActive && this.allpasses.length > 0) {
+            let apOut = this.allpasses[0].process(outSum);
+            // 30% wet blend for the allpass
+            outSum = outSum * 0.7 + apOut * 0.3;
         }
+
+        // Simple One-Pole Lowpass Filter applied post-pitchshift.
+        // This cheaply and effectively rounds off digital harshness ("digital sand")
+        // and phasey chattering without adding allocations or heavy CPU cost.
+        // Alpha coefficient ~0.7 to 0.8 rolls off extreme highs lightly.
+        let lpAlpha = 0.75;
+        this.lpState = this.lpState + lpAlpha * (outSum - this.lpState);
+        outSum = this.lpState;
 
         // Gain compensation: 2 overlapping Hann windows spaced by 0.5 phase sum exactly to 1.0.
         // No division needed. Return outSum directly.
@@ -523,9 +542,9 @@ class GlitchShifterProcessor extends AudioWorkletProcessor {
             pitch_semitones: 7.0,
             pitch_mod_depth_cents: 0.0,
             pitch_mod_rate_hz: 0.2,
-            pitch_mix: 1.0,
+            pitch_mix: 0.7,
             pitch_allpass_active: false,
-            pitch_allpass_feedback: 0.5,
+            pitch_allpass_feedback: 0.15,
             reverb_room: 0.9,
             reverb_damp: 0.2,
             reverb_wet: 0.25,
