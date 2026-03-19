@@ -119,8 +119,10 @@ class PitchShifter {
         // Initialize 3 short prime-based allpasses (sizes relative to 44.1kHz)
         // Adjust prime sizes to sample rate. Typical small diffusion sizes: 227, 347, 443
         const primeSizes = [227, 347, 443];
+        const primeSizes = [227, 347, 443];
+        const srRatio = this.sr / 44100.0;
         for (let i = 0; i < 3; i++) {
-            let apSize = Math.floor(primeSizes[i] * (this.sr / 44100.0));
+            let apSize = Math.floor(primeSizes[i] * srRatio);
             // Ensure size is at least 1
             if (apSize < 1) apSize = 1;
             this.allpasses[i].init(apSize);
