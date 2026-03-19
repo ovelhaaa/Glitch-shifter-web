@@ -309,7 +309,7 @@ class PitchShifter {
 
         // Apply short allpasses for diffusion (metallic reduction)
         if (this.allpassActive) {
-            for (let i = 0; i < 3; i++) {
+            for (let i = 0; i < this.allpasses.length; i++) {
                 outSum = this.allpasses[i].process(outSum);
             }
         }
