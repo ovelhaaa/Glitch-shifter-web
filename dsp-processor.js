@@ -66,9 +66,7 @@ class PitchShifter {
         this.allpassActive = false;
         this.allpasses = [];
         // Only 1 allpass, used as a subtle diffusion blend, not a harsh series block
-        for (let i = 0; i < 1; i++) {
-            this.allpasses.push(new Allpass());
-        }
+        this.allpasses.push(new Allpass());
 
         // Post-shifter smoothing lowpass filter state
         this.lpState = 0.0;
@@ -91,9 +89,11 @@ class PitchShifter {
         this.buf = new Float32Array(this.bufSize + 8);
         this.writePos = 0;
 
+        const TARGET_GRAIN_SIZE_S = 0.060;
+
         // Setup grain geometry for maximum smoothness
         // Target 60ms grain size for a smoother, less chattering response
-        this.grainSizeSamples = Math.floor(this.sr * 0.060);
+        this.grainSizeSamples = Math.floor(this.sr * TARGET_GRAIN_SIZE_S);
         if (this.grainSizeSamples < 128) this.grainSizeSamples = 128;
         this.phaseInc = 1.0 / this.grainSizeSamples;
 
@@ -105,7 +105,7 @@ class PitchShifter {
         // We now set a very conservative base delay to ensure the read pointer almost
         // NEVER touches the forbidden zone during normal [-12, +12] st operation.
         // Base delay = max(~60ms, grainSize + 512).
-        let minBaseDelay = Math.round(this.sr * 0.060);
+        let minBaseDelay = Math.round(this.sr * TARGET_GRAIN_SIZE_S);
         this.baseDelaySamples = Math.max(minBaseDelay, this.grainSizeSamples + 512);
 
         // At rate=2.0 (+12st), maximum forward excursion is 0.5 * grainSize * (2.0 - 1.0) = 0.5 * grainSize.
@@ -122,15 +122,13 @@ class PitchShifter {
 
         // Initialize 1 short prime-based allpass (size relative to 44.1kHz)
         // Adjust prime size to sample rate. Typical small diffusion size: 227
-        const primeSizes = [227];
+        const primeSize = 227;
         const srRatio = this.sr / 44100.0;
-        for (let i = 0; i < 1; i++) {
-            let apSize = Math.floor(primeSizes[i] * srRatio);
-            // Ensure size is at least 1
-            if (apSize < 1) apSize = 1;
-            this.allpasses[i].init(apSize);
-            this.allpasses[i].feedback = 0.15; // Low default feedback
-        }
+        let apSize = Math.floor(primeSize * srRatio);
+        // Ensure size is at least 1
+        if (apSize < 1) apSize = 1;
+        this.allpasses[0].init(apSize);
+        this.allpasses[0].feedback = 0.15; // Low default feedback
 
         this.active = true;
         return true;
